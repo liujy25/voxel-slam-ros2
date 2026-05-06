@@ -34,7 +34,7 @@ public:
     Eigen::Matrix3d R_pose;
     Eigen::Vector3d t_pose;
 
-    if (relocalized) {
+    if (relocalized && !pure_odometry_mode) {
       // After relocalization: transform to map coordinate
       // T_map_aft = T_map_cam * T_cam_aft
       R_pose = R_map_cam * xc.R;
@@ -47,11 +47,19 @@ public:
 
     Eigen::Quaterniond q_pose(R_pose);
 
-    // Publish camera_init → aft_mapped (in map coordinate after relocalization)
     geometry_msgs::msg::TransformStamped tf_msg;
     tf_msg.header.stamp = now;
-    tf_msg.header.frame_id = "camera_init";
-    tf_msg.child_frame_id = "aft_mapped";
+    if(pure_odometry_mode)
+    {
+      tf_msg.header.frame_id = odom_frame_id;
+      tf_msg.child_frame_id = odom_child_frame_id;
+    }
+    else
+    {
+      // Publish camera_init → aft_mapped (in map coordinate after relocalization)
+      tf_msg.header.frame_id = "camera_init";
+      tf_msg.child_frame_id = "aft_mapped";
+    }
     tf_msg.transform.translation.x = t_pose.x();
     tf_msg.transform.translation.y = t_pose.y();
     tf_msg.transform.translation.z = t_pose.z();
@@ -119,6 +127,8 @@ public:
   void set_map_origin(const Eigen::Matrix3d &R_map_base, const Eigen::Vector3d &t_map_base,
                       const Eigen::Matrix3d &R_cam_aft, const Eigen::Vector3d &t_cam_aft)
   {
+    if(pure_odometry_mode) return;
+
     // if (relocalized) {
     //   RCLCPP_DEBUG(g_node->get_logger(), "Already relocalized, ignoring");
     //   return;
@@ -183,6 +193,13 @@ public:
     ap.z = pcurr[2];
     ap.curvature = jour;
     ap.intensity = cur_session;
+    if(pure_odometry_mode)
+    {
+      pcl::PointCloud<PointType> path_now;
+      path_now.push_back(ap);
+      pub_pl_func(path_now, pub_curr_path);
+      return;
+    }
     pcl_path.push_back(ap);
     pub_pl_func(pcl_path, pub_curr_path);
   }
@@ -203,6 +220,21 @@ public:
         ap.intensity = cur_session;
         pcl_send.push_back(ap);
       }
+    }
+
+    if(pure_odometry_mode)
+    {
+      pcl::PointCloud<PointType> path_now;
+      PointType ap;
+      Eigen::Vector3d pcurr = x_buf[win_count-1].p;
+      ap.x = pcurr[0];
+      ap.y = pcurr[1];
+      ap.z = pcurr[2];
+      ap.intensity = cur_session;
+      path_now.push_back(ap);
+      pub_pl_func(path_now, pub_curr_path);
+      pub_pl_func(pcl_send, pub_cmap);
+      return;
     }
 
     for(int i=0; i<win_count; i++)
@@ -900,6 +932,7 @@ public:
     string lid_topic, imu_topic;
     n->declare_parameter<std::string>("General.lid_topic", "/livox/lidar");
     n->declare_parameter<std::string>("General.imu_topic", "/livox/imu");
+    n->declare_parameter<bool>("General.pure_odometry_mode", false);
     n->declare_parameter<std::string>("General.odom_topic", "/state_estimation");
     n->declare_parameter<std::string>("General.odom_frame", "odom");
     n->declare_parameter<std::string>("General.odom_child_frame", "imu_link");
@@ -915,6 +948,7 @@ public:
 
     lid_topic = n->get_parameter("General.lid_topic").as_string();
     imu_topic = n->get_parameter("General.imu_topic").as_string();
+    pure_odometry_mode = n->get_parameter("General.pure_odometry_mode").as_bool();
     odom_topic_name = n->get_parameter("General.odom_topic").as_string();
     odom_frame_id = n->get_parameter("General.odom_frame").as_string();
     odom_child_frame_id = n->get_parameter("General.odom_child_frame").as_string();
@@ -926,6 +960,8 @@ public:
     vecT = n->get_parameter("General.extrinsic_tran").as_double_array();
     vecR = n->get_parameter("General.extrinsic_rota").as_double_array();
     is_save_map = n->get_parameter("General.is_save_map").as_int();
+    if(pure_odometry_mode)
+      sessionNames.push_back(bagname);
 
     auto imu_qos = rclcpp::SensorDataQoS().keep_last(2000);   // ~5s at 400Hz
     auto pcl_qos = rclcpp::SensorDataQoS().keep_last(20);     // ~2s at 10Hz
@@ -1032,9 +1068,78 @@ public:
     }
 
     sws.resize(thread_num);
-    RCLCPP_INFO(n->get_logger(), "VoxelSLAM initialized - session: %s, lidar_type: %d, win_size: %d, odom_topic: %s (%s -> %s)",
+    RCLCPP_INFO(n->get_logger(), "VoxelSLAM initialized - session: %s, lidar_type: %d, win_size: %d, odom_topic: %s (%s -> %s), pure_odometry_mode: %s",
                 bagname.c_str(), feat.lidar_type, win_size,
-                odom_topic_name.c_str(), odom_frame_id.c_str(), odom_child_frame_id.c_str());
+                odom_topic_name.c_str(), odom_frame_id.c_str(), odom_child_frame_id.c_str(),
+                pure_odometry_mode ? "true" : "false");
+  }
+
+  ~VOXEL_SLAM()
+  {
+    for(IMU_PRE *imu_pre: imu_pre_buf)
+      delete imu_pre;
+    imu_pre_buf.clear();
+
+    for(OctoTree *oct: octos_release)
+      delete oct;
+    octos_release.clear();
+
+    for(auto &sw_vec: sws)
+    {
+      for(SlideWindow *sw: sw_vec)
+        delete sw;
+      sw_vec.clear();
+    }
+
+    for(ScanPose *bl: buf_lba2loop)
+      delete bl;
+    buf_lba2loop.clear();
+    for(ScanPose *bl: buf_lba2loop_tem)
+      delete bl;
+    buf_lba2loop_tem.clear();
+
+    const bool scanposes_in_multimap =
+      std::find(multimap_scanPoses.begin(), multimap_scanPoses.end(), scanPoses) != multimap_scanPoses.end();
+    const bool keyframes_in_multimap =
+      std::find(multimap_keyframes.begin(), multimap_keyframes.end(), keyframes) != multimap_keyframes.end();
+
+    if(scanPoses != nullptr && !scanposes_in_multimap)
+    {
+      for(ScanPose *bl: *scanPoses)
+        delete bl;
+    }
+
+    if(keyframes != nullptr && !keyframes_in_multimap)
+    {
+      for(Keyframe *kf: *keyframes)
+        delete kf;
+    }
+
+    bool scanposes_deleted = false;
+    for(vector<ScanPose*> *poses: multimap_scanPoses)
+    {
+      if(poses == nullptr) continue;
+      if(poses == scanPoses) scanposes_deleted = true;
+      delete poses;
+    }
+    multimap_scanPoses.clear();
+
+    bool keyframes_deleted = false;
+    for(vector<Keyframe*> *kfs: multimap_keyframes)
+    {
+      if(kfs == nullptr) continue;
+      if(kfs == keyframes) keyframes_deleted = true;
+      delete kfs;
+    }
+    multimap_keyframes.clear();
+
+    if(scanPoses != nullptr && !scanposes_deleted)
+      delete scanPoses;
+    scanPoses = nullptr;
+
+    if(keyframes != nullptr && !keyframes_deleted)
+      delete keyframes;
+    keyframes = nullptr;
   }
 
   // The point-to-plane alignment for odometry
@@ -1440,7 +1545,8 @@ public:
     win_count++;
     x_buf.push_back(x_curr);
     pvec_buf.push_back(pptr);
-    ResultOutput::instance().pub_localtraj(pwld, 0, x_curr, sessionNames.size()-1, pcl_path);
+    int cur_session = sessionNames.empty() ? 0 : static_cast<int>(sessionNames.size()) - 1;
+    ResultOutput::instance().pub_localtraj(pwld, 0, x_curr, cur_session, pcl_path);
 
     if(win_count > 1)
     {
@@ -1791,7 +1897,8 @@ public:
 
         pwld.clear();
         pvec_update(pptr, x_curr, pwld);
-        ResultOutput::instance().pub_localtraj(pwld, jour, x_curr, sessionNames.size()-1, pcl_path);
+        int cur_session = sessionNames.empty() ? 0 : static_cast<int>(sessionNames.size()) - 1;
+        ResultOutput::instance().pub_localtraj(pwld, jour, x_curr, cur_session, pcl_path);
 
         t1 = g_node->now().seconds();
 
@@ -1804,7 +1911,8 @@ public:
           imu_pre_buf[win_count-2]->push_imu(imus);
         }
         
-        keyframe_loading(jour);
+        if(!pure_odometry_mode)
+          keyframe_loading(jour);
         voxhess.clear(); voxhess.win_size = win_size;
 
         // cut_voxel(surf_map, pvec_buf[win_count-1], win_count-1, surf_map_slide, win_size, pwld, sws[0]);
@@ -1823,10 +1931,13 @@ public:
 
           last_pos = x_curr.p; jour = 0;
 
-          mtx_loop.lock();
-          buf_lba2loop_tem.swap(buf_lba2loop);
-          mtx_loop.unlock();
-          reset_flag = 1;
+          if(!pure_odometry_mode)
+          {
+            mtx_loop.lock();
+            buf_lba2loop_tem.swap(buf_lba2loop);
+            mtx_loop.unlock();
+            reset_flag = 1;
+          }
 
           motion_init_flag = 1;
           history_kfsize = 0;
@@ -1854,18 +1965,22 @@ public:
           opt_lsv.damping_iter(x_buf, voxhess, imu_pre_buf, &hess);
         }
 
-        ScanPose *bl = new ScanPose(x_buf[0], pvec_buf[0]);
-        bl->v6 = hess.block<6, 6>(0, DIM).diagonal();
-        for(int i=0; i<6; i++) bl->v6[i] = 1.0 / fabs(bl->v6[i]);
-        mtx_loop.lock();
-        buf_lba2loop.push_back(bl);
-        mtx_loop.unlock();
+        if(!pure_odometry_mode)
+        {
+          ScanPose *bl = new ScanPose(x_buf[0], pvec_buf[0]);
+          bl->v6 = hess.block<6, 6>(0, DIM).diagonal();
+          for(int i=0; i<6; i++) bl->v6[i] = 1.0 / fabs(bl->v6[i]);
+          mtx_loop.lock();
+          buf_lba2loop.push_back(bl);
+          mtx_loop.unlock();
+        }
 
         x_curr.R = x_buf[win_count-1].R;
         x_curr.p = x_buf[win_count-1].p;
         t5 = g_node->now().seconds();
 
-        ResultOutput::instance().pub_localmap(mgsize, sessionNames.size()-1, pvec_buf, x_buf, pcl_path, win_base, win_count);
+        int cur_session = sessionNames.empty() ? 0 : static_cast<int>(sessionNames.size()) - 1;
+        ResultOutput::instance().pub_localmap(mgsize, cur_session, pvec_buf, x_buf, pcl_path, win_base, win_count);
 
         multi_margi(surf_map_slide, jour, win_count, x_buf, voxhess, sws[0]);
         t6 = g_node->now().seconds();
@@ -1931,10 +2046,28 @@ public:
     for(int i=0; i<octos.size(); i++)
       delete octos[i];
     octos.clear();
+    surf_map.clear();
+    surf_map_slide.clear();
+    map_loop.clear();
 
-    for(int i=0; i<sws[0].size(); i++)
-      delete sws[0][i];
-    sws[0].clear();
+    for(OctoTree *oct: octos_release)
+      delete oct;
+    octos_release.clear();
+
+    for(IMU_PRE *imu_pre: imu_pre_buf)
+      delete imu_pre;
+    imu_pre_buf.clear();
+
+    for(auto &sw_vec: sws)
+    {
+      for(SlideWindow *sw: sw_vec)
+        delete sw;
+      sw_vec.clear();
+    }
+
+    x_buf.clear();
+    pvec_buf.clear();
+    pcl_path.clear();
     malloc_trim(0);
   }
 
@@ -2867,13 +3000,22 @@ int main(int argc, char **argv)
   std::thread thread_spin([]() {
     rclcpp::spin(g_node);
   });
-  std::thread thread_loop(&VOXEL_SLAM::thd_loop_closure, &vs, std::ref(g_node));
-  std::thread thread_gba(&VOXEL_SLAM::thd_globalmapping, &vs, std::ref(g_node));
+  std::unique_ptr<std::thread> thread_loop;
+  std::unique_ptr<std::thread> thread_gba;
+  if(!pure_odometry_mode)
+  {
+    thread_loop = std::make_unique<std::thread>(&VOXEL_SLAM::thd_loop_closure, &vs, std::ref(g_node));
+    thread_gba = std::make_unique<std::thread>(&VOXEL_SLAM::thd_globalmapping, &vs, std::ref(g_node));
+  }
   vs.thd_odometry_localmapping(g_node);
 
   RCLCPP_INFO(g_node->get_logger(), "Odometry thread finished, waiting for other threads...");
-  thread_loop.join();
-  thread_gba.join();
+  if(thread_loop)
+    thread_loop->join();
+  if(thread_gba)
+    thread_gba->join();
+  delete[] mp;
+  mp = nullptr;
   if(rclcpp::ok())
     rclcpp::shutdown();
   thread_spin.join();

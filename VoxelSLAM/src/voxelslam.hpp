@@ -25,6 +25,7 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseQR>
 #include "BTC.h"
+#include <algorithm>
 
 using namespace std;
 
@@ -45,6 +46,7 @@ rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pub_relocalized;
 rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
 rclcpp::SubscriptionBase::SharedPtr sub_pcl;
 
+bool pure_odometry_mode = false;
 string odom_topic_name = "/state_estimation";
 string odom_frame_id = "odom";
 string odom_child_frame_id = "imu_link";
@@ -55,7 +57,7 @@ void pub_pl_func(T &pl, rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::Shared
   pl.height = 1; pl.width = pl.size();
   sensor_msgs::msg::PointCloud2 output;
   pcl::toROSMsg(pl, output);
-  output.header.frame_id = "camera_init";
+  output.header.frame_id = pure_odometry_mode ? odom_frame_id : "camera_init";
   output.header.stamp = g_node->now();
   pub->publish(output);
 }
