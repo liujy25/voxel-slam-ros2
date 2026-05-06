@@ -34,6 +34,7 @@ extern rclcpp::Node::SharedPtr g_node;
 extern std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster;
 
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_scan;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_body_scan;
 rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cmap;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_init;
@@ -50,16 +51,43 @@ bool pure_odometry_mode = false;
 string odom_topic_name = "/state_estimation";
 string odom_frame_id = "odom";
 string odom_child_frame_id = "imu_link";
+string body_scan_topic_name = "/body_scan";
+string body_scan_frame_id = "imu_link";
+
+template <typename T>
+void pub_pl_func(T &pl, rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub, const string &frame_id)
+{
+  if(!pub) return;
+  pl.height = 1; pl.width = pl.size();
+  sensor_msgs::msg::PointCloud2 output;
+  pcl::toROSMsg(pl, output);
+  output.header.frame_id = frame_id;
+  output.header.stamp = g_node->now();
+  pub->publish(output);
+}
 
 template <typename T>
 void pub_pl_func(T &pl, rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub)
 {
-  pl.height = 1; pl.width = pl.size();
-  sensor_msgs::msg::PointCloud2 output;
-  pcl::toROSMsg(pl, output);
-  output.header.frame_id = pure_odometry_mode ? odom_frame_id : "camera_init";
-  output.header.stamp = g_node->now();
-  pub->publish(output);
+  pub_pl_func(pl, pub, pure_odometry_mode ? odom_frame_id : "camera_init");
+}
+
+inline void pub_body_scan_func(const PVec &pvec, rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub)
+{
+  if(!pub) return;
+  pcl::PointCloud<PointType> pl_body;
+  pl_body.reserve(pvec.size());
+  for(const pointVar &pv: pvec)
+  {
+    PointType ap;
+    ap.x = pv.pnt.x();
+    ap.y = pv.pnt.y();
+    ap.z = pv.pnt.z();
+    ap.intensity = 0.0f;
+    ap.curvature = 0.0f;
+    pl_body.push_back(ap);
+  }
+  pub_pl_func(pl_body, pub, body_scan_frame_id);
 }
 
 mutex mBuf;

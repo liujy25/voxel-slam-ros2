@@ -936,6 +936,8 @@ public:
     n->declare_parameter<std::string>("General.odom_topic", "/state_estimation");
     n->declare_parameter<std::string>("General.odom_frame", "odom");
     n->declare_parameter<std::string>("General.odom_child_frame", "imu_link");
+    n->declare_parameter<std::string>("General.body_scan_topic", "/body_scan");
+    n->declare_parameter<std::string>("General.body_scan_frame", "imu_link");
     n->declare_parameter<bool>("General.imu_acc_unit_is_g", false);
     n->declare_parameter<std::string>("General.bagname", "site3_handheld_4");
     n->declare_parameter<std::string>("General.save_path", "");
@@ -952,6 +954,8 @@ public:
     odom_topic_name = n->get_parameter("General.odom_topic").as_string();
     odom_frame_id = n->get_parameter("General.odom_frame").as_string();
     odom_child_frame_id = n->get_parameter("General.odom_child_frame").as_string();
+    body_scan_topic_name = n->get_parameter("General.body_scan_topic").as_string();
+    body_scan_frame_id = n->get_parameter("General.body_scan_frame").as_string();
     bagname = n->get_parameter("General.bagname").as_string();
     savepath = n->get_parameter("General.save_path").as_string();
     feat.lidar_type = n->get_parameter("General.lidar_type").as_int();
@@ -966,8 +970,11 @@ public:
     auto imu_qos = rclcpp::SensorDataQoS().keep_last(2000);   // ~5s at 400Hz
     auto pcl_qos = rclcpp::SensorDataQoS().keep_last(20);     // ~2s at 10Hz
     auto odom_qos = rclcpp::SensorDataQoS().keep_last(50);
+    auto body_scan_qos = rclcpp::SensorDataQoS().keep_last(10);
 
     pub_odom = n->create_publisher<nav_msgs::msg::Odometry>(odom_topic_name, odom_qos);
+    if(pure_odometry_mode)
+      pub_body_scan = n->create_publisher<sensor_msgs::msg::PointCloud2>(body_scan_topic_name, body_scan_qos);
 
     sub_imu = n->create_subscription<sensor_msgs::msg::Imu>(
         imu_topic, imu_qos, imu_handler);
@@ -1068,9 +1075,10 @@ public:
     }
 
     sws.resize(thread_num);
-    RCLCPP_INFO(n->get_logger(), "VoxelSLAM initialized - session: %s, lidar_type: %d, win_size: %d, odom_topic: %s (%s -> %s), pure_odometry_mode: %s",
+    RCLCPP_INFO(n->get_logger(), "VoxelSLAM initialized - session: %s, lidar_type: %d, win_size: %d, odom_topic: %s (%s -> %s), body_scan: %s (%s), pure_odometry_mode: %s",
                 bagname.c_str(), feat.lidar_type, win_size,
                 odom_topic_name.c_str(), odom_frame_id.c_str(), odom_child_frame_id.c_str(),
+                pure_odometry_mode ? body_scan_topic_name.c_str() : "disabled", body_scan_frame_id.c_str(),
                 pure_odometry_mode ? "true" : "false");
   }
 
@@ -1537,6 +1545,8 @@ public:
     double downkd = down_size >= 0.5 ? down_size : 0.5;
     down_sampling_voxel(*pcl_curr, downkd);
     var_init(extrin_para, *pcl_curr, pptr, dept_err, beam_err);
+    if(pure_odometry_mode)
+      pub_body_scan_func(*pptr, pub_body_scan);
     lio_state_estimation_kdtree(pptr);
 
     pwld.clear();
@@ -1887,6 +1897,8 @@ public:
 
         PVecPtr pptr(new PVec);
         var_init(extrin_para, pl_down, pptr, dept_err, beam_err);
+        if(pure_odometry_mode)
+          pub_body_scan_func(*pptr, pub_body_scan);
 
         if(lio_state_estimation(pptr))
         {
@@ -2972,29 +2984,32 @@ int main(int argc, char **argv)
   // Initialize TF broadcaster
   tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(g_node);
 
-  // Create publishers
-  pub_cmap = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_cmap", 100);
-
-  // Use transient_local for previous map so late subscribers (like RViz) can receive it
-  rclcpp::QoS pmap_qos(1);
-  pmap_qos.transient_local().reliable();
-  pub_pmap = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_pmap", pmap_qos);
-
-  pub_scan = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_scan", 100);
-  pub_init = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_init", 100);
-  pub_test = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_test", 100);
-  pub_curr_path = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_path", 100);
-  pub_prev_path = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_true", 100);
-
-  // Relocalized event publisher (transient_local for late subscribers)
-  rclcpp::QoS relocalized_qos(1);
-  relocalized_qos.transient_local().reliable();
-  pub_relocalized = g_node->create_publisher<std_msgs::msg::Empty>("/slam/relocalized", relocalized_qos);
-
   VOXEL_SLAM vs(g_node);
   mp = new int[vs.win_size];
   for(int i=0; i<vs.win_size; i++)
     mp[i] = i;
+
+  // Create publishers after parameters are loaded so pure odometry mode can trim unused outputs.
+  if(!pure_odometry_mode)
+  {
+    pub_cmap = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_cmap", 100);
+
+    // Use transient_local for previous map so late subscribers (like RViz) can receive it
+    rclcpp::QoS pmap_qos(1);
+    pmap_qos.transient_local().reliable();
+    pub_pmap = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_pmap", pmap_qos);
+
+    pub_scan = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_scan", 100);
+    pub_init = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_init", 100);
+    pub_test = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_test", 100);
+    pub_curr_path = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_path", 100);
+    pub_prev_path = g_node->create_publisher<sensor_msgs::msg::PointCloud2>("/map_true", 100);
+
+    // Relocalized event publisher (transient_local for late subscribers)
+    rclcpp::QoS relocalized_qos(1);
+    relocalized_qos.transient_local().reliable();
+    pub_relocalized = g_node->create_publisher<std_msgs::msg::Empty>("/slam/relocalized", relocalized_qos);
+  }
 
   RCLCPP_INFO(g_node->get_logger(), "Starting VoxelSLAM threads...");
   std::thread thread_spin([]() {

@@ -3,6 +3,10 @@
     General:
       lid_topic: "/hdas/lidar_chassis_left"
       imu_topic: "/livox/imu"
+      pure_odometry_mode: true
+      odom_topic: "/state_estimation"
+      odom_frame: "odom"
+      odom_child_frame: "imu_link"
       imu_acc_unit_is_g: true
       save_path: "/home/zale/save_datas/"
       previous_map: ""
