@@ -148,6 +148,17 @@ bool sync_packages(pcl::PointCloud<PointType>::Ptr &pl_ptr, deque<sensor_msgs::m
     mBuf.unlock();
 
     p_imu.pcl_end_time = p_imu.pcl_beg_time + pl_ptr->back().curvature;
+    // RCLCPP_WARN(
+    //   g_node->get_logger(),
+    //   "[SYNC_DEBUG] pcl_beg=%.9f pcl_end=%.9f dt=%.6f imu_last=%.9f pcl_size=%zu last_curv=%.6f imu_buf=%zu",
+    //   p_imu.pcl_beg_time,
+    //   p_imu.pcl_end_time,
+    //   p_imu.pcl_end_time - p_imu.pcl_beg_time,
+    //   imu_last_time,
+    //   pl_ptr->size(),
+    //   pl_ptr->back().curvature,
+    //   imu_buf.size()
+    // );
 
     // Skip stale data that would cause timestamp regression
     // This can happen if old data was buffered before processing started
