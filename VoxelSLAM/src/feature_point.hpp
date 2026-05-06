@@ -126,6 +126,12 @@ public:
   double blind = 1;
   double omega_l = 3610;
 
+  // Bounding box filter for robot self-point removal (side-mounted lidar)
+  // Set use_bbox_filter=false to disable
+  bool use_bbox_filter = true;
+  double bbox_min_x = -0.63, bbox_min_y = -0.63, bbox_min_z = -0.2;
+  double bbox_max_x = 0.05, bbox_max_y = 0.05, bbox_max_z = 2.0;
+
   double process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, pcl::PointCloud<PointType> &pl_full)
   {
     livox_handler(msg, pl_full);
@@ -194,6 +200,13 @@ public:
       {
         if(ap.x*ap.x + ap.y*ap.y + ap.z*ap.z > blind)
         {
+          if(use_bbox_filter)
+          {
+            bool inside_bbox = (ap.x >= bbox_min_x && ap.x <= bbox_max_x &&
+                               ap.y >= bbox_min_y && ap.y <= bbox_max_y &&
+                               ap.z >= bbox_min_z && ap.z <= bbox_max_z);
+            if(inside_bbox) continue;
+          }
           pl_full.push_back(ap);
         }
       }
@@ -495,6 +508,13 @@ public:
       {
         if(ap.x*ap.x + ap.y*ap.y + ap.z*ap.z > blind)
         {
+          if(use_bbox_filter)
+          {
+            bool inside_bbox = (ap.x >= bbox_min_x && ap.x <= bbox_max_x &&
+                               ap.y >= bbox_min_y && ap.y <= bbox_max_y &&
+                               ap.z >= bbox_min_z && ap.z <= bbox_max_z);
+            if(inside_bbox) continue;
+          }
           pl_full.push_back(ap);
         }
       }

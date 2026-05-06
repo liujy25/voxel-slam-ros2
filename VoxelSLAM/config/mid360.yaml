@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     General:
-      lid_topic: "/livox/lidar"
+      lid_topic: "/hdas/lidar_chassis_left"
       imu_topic: "/livox/imu"
       imu_acc_unit_is_g: true
       save_path: "/home/zale/save_datas/"
