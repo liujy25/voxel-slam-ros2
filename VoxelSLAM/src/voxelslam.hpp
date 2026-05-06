@@ -10,6 +10,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <malloc.h>
@@ -32,6 +33,7 @@ extern rclcpp::Node::SharedPtr g_node;
 extern std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster;
 
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_scan;
+rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_cmap;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_init;
 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_pmap;
@@ -42,6 +44,10 @@ rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pub_relocalized;
 
 rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
 rclcpp::SubscriptionBase::SharedPtr sub_pcl;
+
+string odom_topic_name = "/state_estimation";
+string odom_frame_id = "odom";
+string odom_child_frame_id = "imu_link";
 
 template <typename T>
 void pub_pl_func(T &pl, rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &pub)

@@ -13,6 +13,9 @@ std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster = nullptr;
 class ResultOutput
 {
 public:
+  double last_odom_stamp = -1.0;
+  Eigen::Matrix3d last_odom_R = Eigen::Matrix3d::Identity();
+
   static ResultOutput &instance()
   {
     static ResultOutput inst;
@@ -58,6 +61,59 @@ public:
     tf_msg.transform.rotation.z = q_pose.z();
 
     tf_broadcaster->sendTransform(tf_msg);
+
+    if(pub_odom)
+    {
+      nav_msgs::msg::Odometry odom_msg;
+      odom_msg.header.stamp = now;
+      odom_msg.header.frame_id = odom_frame_id;
+      odom_msg.child_frame_id = odom_child_frame_id;
+
+      Eigen::Quaterniond q_odom(xc.R);
+      odom_msg.pose.pose.position.x = xc.p.x();
+      odom_msg.pose.pose.position.y = xc.p.y();
+      odom_msg.pose.pose.position.z = xc.p.z();
+      odom_msg.pose.pose.orientation.w = q_odom.w();
+      odom_msg.pose.pose.orientation.x = q_odom.x();
+      odom_msg.pose.pose.orientation.y = q_odom.y();
+      odom_msg.pose.pose.orientation.z = q_odom.z();
+
+      Eigen::Vector3d linear_vel_body = xc.R.transpose() * xc.v;
+      Eigen::Vector3d angular_vel_body = Eigen::Vector3d::Zero();
+      double stamp_sec = now.seconds();
+      if(last_odom_stamp > 0.0)
+      {
+        double dt = stamp_sec - last_odom_stamp;
+        if(dt > 1e-4)
+          angular_vel_body = Log(last_odom_R.transpose() * xc.R) / dt;
+      }
+
+      last_odom_stamp = stamp_sec;
+      last_odom_R = xc.R;
+
+      odom_msg.twist.twist.linear.x = linear_vel_body.x();
+      odom_msg.twist.twist.linear.y = linear_vel_body.y();
+      odom_msg.twist.twist.linear.z = linear_vel_body.z();
+      odom_msg.twist.twist.angular.x = angular_vel_body.x();
+      odom_msg.twist.twist.angular.y = angular_vel_body.y();
+      odom_msg.twist.twist.angular.z = angular_vel_body.z();
+
+      odom_msg.pose.covariance[0] = xc.cov(3, 3);
+      odom_msg.pose.covariance[7] = xc.cov(4, 4);
+      odom_msg.pose.covariance[14] = xc.cov(5, 5);
+      odom_msg.pose.covariance[21] = xc.cov(0, 0);
+      odom_msg.pose.covariance[28] = xc.cov(1, 1);
+      odom_msg.pose.covariance[35] = xc.cov(2, 2);
+
+      odom_msg.twist.covariance[0] = xc.cov(6, 6);
+      odom_msg.twist.covariance[7] = xc.cov(7, 7);
+      odom_msg.twist.covariance[14] = xc.cov(8, 8);
+      odom_msg.twist.covariance[21] = 0.1;
+      odom_msg.twist.covariance[28] = 0.1;
+      odom_msg.twist.covariance[35] = 0.1;
+
+      pub_odom->publish(odom_msg);
+    }
   }
 
   void set_map_origin(const Eigen::Matrix3d &R_map_base, const Eigen::Vector3d &t_map_base,
@@ -844,6 +900,9 @@ public:
     string lid_topic, imu_topic;
     n->declare_parameter<std::string>("General.lid_topic", "/livox/lidar");
     n->declare_parameter<std::string>("General.imu_topic", "/livox/imu");
+    n->declare_parameter<std::string>("General.odom_topic", "/state_estimation");
+    n->declare_parameter<std::string>("General.odom_frame", "odom");
+    n->declare_parameter<std::string>("General.odom_child_frame", "imu_link");
     n->declare_parameter<bool>("General.imu_acc_unit_is_g", false);
     n->declare_parameter<std::string>("General.bagname", "site3_handheld_4");
     n->declare_parameter<std::string>("General.save_path", "");
@@ -856,6 +915,9 @@ public:
 
     lid_topic = n->get_parameter("General.lid_topic").as_string();
     imu_topic = n->get_parameter("General.imu_topic").as_string();
+    odom_topic_name = n->get_parameter("General.odom_topic").as_string();
+    odom_frame_id = n->get_parameter("General.odom_frame").as_string();
+    odom_child_frame_id = n->get_parameter("General.odom_child_frame").as_string();
     bagname = n->get_parameter("General.bagname").as_string();
     savepath = n->get_parameter("General.save_path").as_string();
     feat.lidar_type = n->get_parameter("General.lidar_type").as_int();
@@ -867,6 +929,9 @@ public:
 
     auto imu_qos = rclcpp::SensorDataQoS().keep_last(2000);   // ~5s at 400Hz
     auto pcl_qos = rclcpp::SensorDataQoS().keep_last(20);     // ~2s at 10Hz
+    auto odom_qos = rclcpp::SensorDataQoS().keep_last(50);
+
+    pub_odom = n->create_publisher<nav_msgs::msg::Odometry>(odom_topic_name, odom_qos);
 
     sub_imu = n->create_subscription<sensor_msgs::msg::Imu>(
         imu_topic, imu_qos, imu_handler);
@@ -967,8 +1032,9 @@ public:
     }
 
     sws.resize(thread_num);
-    RCLCPP_INFO(n->get_logger(), "VoxelSLAM initialized - session: %s, lidar_type: %d, win_size: %d",
-                bagname.c_str(), feat.lidar_type, win_size);
+    RCLCPP_INFO(n->get_logger(), "VoxelSLAM initialized - session: %s, lidar_type: %d, win_size: %d, odom_topic: %s (%s -> %s)",
+                bagname.c_str(), feat.lidar_type, win_size,
+                odom_topic_name.c_str(), odom_frame_id.c_str(), odom_child_frame_id.c_str());
   }
 
   // The point-to-plane alignment for odometry
@@ -1600,7 +1666,6 @@ public:
     Eigen::MatrixXd hess;
     while(rclcpp::ok())
     {
-      rclcpp::spin_some(g_node);
       if(loop_detect == 1)
       {
         loop_update(); last_pos = x_curr.p; jour = 0;
@@ -1664,7 +1729,7 @@ public:
           malloc_trim(0);
         }
 
-        sleep(0.01);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         continue;
       }
 
@@ -2036,7 +2101,7 @@ public:
 
       if(buf_lba2loop.empty() || loop_detect == 1)
       {
-        sleep(0.01); continue;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue;
       }
       ScanPose *bl_head = nullptr;
       mtx_loop.lock();
@@ -2799,6 +2864,9 @@ int main(int argc, char **argv)
     mp[i] = i;
 
   RCLCPP_INFO(g_node->get_logger(), "Starting VoxelSLAM threads...");
+  std::thread thread_spin([]() {
+    rclcpp::spin(g_node);
+  });
   std::thread thread_loop(&VOXEL_SLAM::thd_loop_closure, &vs, std::ref(g_node));
   std::thread thread_gba(&VOXEL_SLAM::thd_globalmapping, &vs, std::ref(g_node));
   vs.thd_odometry_localmapping(g_node);
@@ -2806,9 +2874,10 @@ int main(int argc, char **argv)
   RCLCPP_INFO(g_node->get_logger(), "Odometry thread finished, waiting for other threads...");
   thread_loop.join();
   thread_gba.join();
+  if(rclcpp::ok())
+    rclcpp::shutdown();
+  thread_spin.join();
 
   RCLCPP_INFO(g_node->get_logger(), "All threads finished. Shutting down VoxelSLAM.");
-  rclcpp::shutdown();
   return 0;
 }
-
